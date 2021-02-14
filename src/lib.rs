@@ -1,10 +1,10 @@
-mod error;
-mod schema_registry;
-mod schema;
 mod encoder;
+mod error;
+mod schema;
+mod schema_registry;
 
-pub use error::SchemaRegistryError;
-pub type SchemaRegistryResult<T> = std::result::Result<T, SchemaRegistryError>;
+pub use error::Error;
+pub type Result<T> = std::result::Result<T, Error>;
 
 #[cfg(test)]
 mod tests {

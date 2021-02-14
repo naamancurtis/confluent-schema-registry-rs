@@ -1,7 +1,7 @@
 #[cfg(features = "avro")]
 use avro_rs::Schema as AvroSchema;
 
-use crate::SchemaRegistryResult;
+use crate::Result;
 
 #[derive(Debug, Clone)]
 pub struct SchemaDetails {
@@ -13,14 +13,29 @@ pub struct SchemaDetails {
     ///
     /// Any time calls to the schema registry are made to fetch schemas, these schema references
     /// will be resolved first. Please be **careful** with recursion here.
-    pub schema_references: Vec<Box<SchemaDetails>>,
+    pub schema_references: Vec<SchemaDetails>,
+}
+
+impl Default for SchemaDetails {
+    /// Sets up some sensible defaults, however please remember to overwrite the subject naming
+    /// strategy to suit your purpose
+    fn default() -> Self {
+        Self {
+            version: None,
+            subject_naming_strategy: SubjectNamingStrategy::TopicNameStrategy {
+                topic_name: "".to_owned(),
+            },
+            is_key: false,
+            schema_references: Vec::new(),
+        }
+    }
 }
 
 impl SchemaDetails {
     pub fn generate_subject_name(&self) -> String {
-        match self.subject_naming_strategy {
+        match &self.subject_naming_strategy {
             SubjectNamingStrategy::SubjectNameStrategy { is_key, subject } => {
-                let suffix = if is_key { "key" } else { "value" };
+                let suffix = if *is_key { "key" } else { "value" };
                 format!("{}-{}", subject, suffix)
             }
             SubjectNamingStrategy::TopicNameStrategy { topic_name } => topic_name.clone(),
@@ -101,11 +116,13 @@ pub enum SubjectNamingStrategy {
 #[derive(Debug, PartialEq)]
 pub enum Schema {
     Protobuf(i32),
+    #[cfg(features = "avro")]
     Avro(AvroSchema),
 }
 
 impl Schema {
-    pub fn new_avro_schema(schema: &str) -> SchemaRegistryResult<Self> {
+    #[cfg(features = "avro")]
+    pub fn new_avro_schema(schema: &str) -> Result<Self> {
         let sch = AvroSchema::parse_str(schema)?;
         Ok(Self::Avro(sch))
     }
