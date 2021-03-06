@@ -6,10 +6,5 @@ mod schema_registry;
 pub use error::Error;
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn it_works() {
-        assert_eq!(2 + 2, 4);
-    }
-}
+#[cfg(feature = "avro")]
+pub use avro_rs as avro;

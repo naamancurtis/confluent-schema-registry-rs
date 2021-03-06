@@ -1,5 +1,6 @@
-#[cfg(features = "avro")]
 use avro_rs::Schema as AvroSchema;
+
+use std::sync::Arc;
 
 use crate::Result;
 
@@ -12,8 +13,28 @@ pub struct SchemaDetails {
     /// A list of other schemas that are required from the registry to resolve this one
     ///
     /// Any time calls to the schema registry are made to fetch schemas, these schema references
-    /// will be resolved first. Please be **careful** with recursion here.
+    /// will be resolved first.
     pub schema_references: Vec<SchemaDetails>,
+    pub format: Format,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Format {
+    Avro,
+    #[cfg(feature = "protobuf")]
+    Protobuf,
+    #[cfg(feature = "json")]
+    Json,
+}
+
+impl Format {
+    pub fn parse_schema(&self, schema: &str) -> Result<Schema> {
+        match *self {
+            #[cfg(feature = "avro")]
+            Self::Avro => Schema::new_avro_schema(schema),
+            _ => unimplemented!("Currently only Avro is supported"),
+        }
+    }
 }
 
 impl Default for SchemaDetails {
@@ -27,6 +48,7 @@ impl Default for SchemaDetails {
             },
             is_key: false,
             schema_references: Vec::new(),
+            format: Format::Avro,
         }
     }
 }
@@ -115,15 +137,22 @@ pub enum SubjectNamingStrategy {
 
 #[derive(Debug, PartialEq)]
 pub enum Schema {
+    #[cfg(feature = "protobuf")]
     Protobuf(i32),
-    #[cfg(features = "avro")]
-    Avro(AvroSchema),
+    Avro(Arc<AvroSchema>),
 }
 
 impl Schema {
-    #[cfg(features = "avro")]
     pub fn new_avro_schema(schema: &str) -> Result<Self> {
         let sch = AvroSchema::parse_str(schema)?;
-        Ok(Self::Avro(sch))
+        Ok(Self::Avro(Arc::new(sch)))
+    }
+
+    pub(crate) fn schema_type(&self) -> &str {
+        match *self {
+            #[cfg(feature = "protobuf")]
+            Self::Protobuf(_) => "Protobuf",
+            Self::Avro(_) => "Avro",
+        }
     }
 }

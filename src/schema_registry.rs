@@ -1,12 +1,12 @@
 use dashmap::DashMap;
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use std::sync::Arc;
 
 use crate::encoder::Encoder;
-use crate::schema::{Schema, SchemaDetails};
-use crate::Result;
+use crate::schema::{Format, Schema, SchemaDetails};
+use crate::{Error, Result};
 
 #[derive(Default)]
 pub struct SchemaRegistry {
@@ -17,31 +17,28 @@ pub struct SchemaRegistry {
 }
 
 impl SchemaRegistry {
-    pub fn new_with_client(client: Client, root_url: String) -> Self {
+    pub fn new(registry_url: String) -> Self {
+        Self::new_with_client(Default::default(), registry_url)
+    }
+
+    pub fn new_with_client(client: Client, registry_url: String) -> Self {
         Self {
             schemas: Default::default(),
             latest_id_mapper: Default::default(),
             http_client: client,
-            url: root_url,
+            url: registry_url,
         }
     }
 
-    pub fn get_encoder<T>(schema: SchemaDetails) -> Box<dyn Encoder<T>>
-    where
-        T: Sized + Serialize,
-    {
-        todo!()
+    pub async fn get_encoder(&self, details: SchemaDetails) -> Result<Encoder> {
+        let schema = self.get_schema(&details).await?;
+        match details.format {
+            Format::Avro => Ok(Encoder::Avro { schema }),
+            _ => unimplemented!("only avro is currently supported"),
+        }
     }
 
-    async fn get_schema<E, T>(
-        &self,
-        schema_details: &SchemaDetails,
-        encoder: E,
-    ) -> Result<SchemaRef>
-    where
-        E: Encoder<T>,
-        T: Sized + Serialize,
-    {
+    async fn get_schema(&self, schema_details: &SchemaDetails) -> Result<SchemaRef> {
         let subject = schema_details.generate_subject_name();
         let id = schema_details
             .version
@@ -49,15 +46,22 @@ impl SchemaRegistry {
 
         // See if we have the schema cached
         if let Some(id) = id {
-            if let Some(schema) = self.check_cache_for_schema(subject.clone(), id) {
+            if let Some(schema) = self.check_cache_for_schema(&subject, id) {
                 let resp = SchemaRef { schema, id };
                 return Ok(resp);
             }
         }
 
+        // @TODO - Add children schemas, they currently do nothing
+        // let mut child_schemas = Vec::with_capacity(schema_details.schema_references.len());
+        // for sub_schema in schema_details.schema_references {
+        //     let child_schema = self.get_schema(sub_schema).await?;
+        //     child_schemas.push(child_schema);
+        // }
+
         // We need to request the schema (or the ID) from the registry
         let (schema_id, schema) = self.fetch_schema(&subject, schema_details.version).await?;
-        let schema = encoder.parse_schema(&schema);
+        let schema = schema_details.format.parse_schema(&schema)?;
         if id.is_none() {
             self.latest_id_mapper.insert(subject.clone(), schema_id);
         }
@@ -74,8 +78,8 @@ impl SchemaRegistry {
         Ok(resp)
     }
 
-    fn check_cache_for_schema(&self, subject: String, id: u32) -> Option<Arc<Schema>> {
-        let subject_schemas = self.schemas.get(&subject)?;
+    fn check_cache_for_schema(&self, subject: &str, id: u32) -> Option<Arc<Schema>> {
+        let subject_schemas = self.schemas.get(subject)?;
         let sub_schemas = subject_schemas.value();
         let schema = sub_schemas.get(&id)?;
         let s = schema.value();
@@ -84,25 +88,33 @@ impl SchemaRegistry {
 
     /// Returns (Schema ID, Raw Schema)
     async fn fetch_schema(&self, subject: &str, id: Option<u32>) -> Result<(u32, String)> {
-        let url = match id {
-            Some(id) => format!("{}/schemas/ids/{}", self.url, id),
-            None => format!("{}/subjects/{}/versions/latest", self.url, subject),
-        };
+        if let Some(id) = id {
+            let url = format!("{}/schemas/ids/{}", self.url, id);
+
+            let response = self.http_client.get(&url).send().await?;
+            let resp = response.json::<SchemaRegistryResponse>().await?;
+            return Ok((id, resp.schema));
+        }
+        let url = format!("{}/subjects/{}/versions/latest", self.url, subject);
         let response = self.http_client.get(&url).send().await?;
         let resp = response.json::<SchemaRegistryResponse>().await?;
-        Ok((resp.version, resp.schema.to_owned()))
+        if resp.version.is_none() {
+            return Err(Error::IDNotReturned);
+        }
+
+        Ok((resp.version.unwrap(), resp.schema))
     }
 }
 
 #[derive(Debug, Deserialize)]
 struct SchemaRegistryResponse {
-    name: String,
-    version: u32,
+    name: Option<String>,
+    version: Option<u32>,
     schema: String,
 }
 
 #[derive(Debug)]
 pub struct SchemaRef {
-    schema: Arc<Schema>,
-    id: u32,
+    pub(crate) schema: Arc<Schema>,
+    pub(crate) id: u32,
 }
