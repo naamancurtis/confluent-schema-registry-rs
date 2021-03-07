@@ -8,6 +8,10 @@ Currently, this crate is mainly designed/built out to meet the requirements I ha
 although I will try _(and am open to contributions)_ to build this out to
 include more functionality. It is also very much a WIP.
 
+At this point in time, only single level Avro Schemas are supported. Although
+the basic framework and structures exist to make building out the rest not too
+complicated.
+
 For a more feature complete crate, check out [Schema Registry Converter](https://github.com/gklijs/schema_registry_converter).
 
 The primary difference between these two crates is that this one was designed to
