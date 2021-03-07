@@ -4,6 +4,7 @@ use serde::de::DeserializeOwned;
 use crate::schema::{Format, Schema};
 use crate::{Error, Result, SchemaRegistry};
 
+#[derive(Clone, Copy)]
 pub struct Deserializer<'a> {
     pub(crate) registry: &'a SchemaRegistry,
 }

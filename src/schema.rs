@@ -1,4 +1,5 @@
 use avro_rs::Schema as AvroSchema;
+use serde::Serialize;
 
 use std::sync::Arc;
 
@@ -9,7 +10,6 @@ pub struct SchemaDetails {
     /// The version of the schema you would like to retrieve, leave as `None` to fetch the latest
     pub version: Option<u32>,
     pub subject_naming_strategy: SubjectNamingStrategy,
-    pub is_key: bool,
     /// A list of other schemas that are required from the registry to resolve this one
     ///
     /// Any time calls to the schema registry are made to fetch schemas, these schema references
@@ -18,7 +18,8 @@ pub struct SchemaDetails {
     pub format: Format,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Format {
     Avro,
     #[cfg(feature = "protobuf")]
@@ -37,6 +38,12 @@ impl Format {
     }
 }
 
+impl Default for Format {
+    fn default() -> Self {
+        Self::Avro
+    }
+}
+
 impl Default for SchemaDetails {
     /// Sets up some sensible defaults, however please remember to overwrite the subject naming
     /// strategy to suit your purpose
@@ -45,8 +52,8 @@ impl Default for SchemaDetails {
             version: None,
             subject_naming_strategy: SubjectNamingStrategy::TopicNameStrategy {
                 topic_name: "".to_owned(),
+                is_key: false,
             },
-            is_key: false,
             schema_references: Vec::new(),
             format: Format::Avro,
         }
@@ -60,7 +67,10 @@ impl SchemaDetails {
                 let suffix = if *is_key { "key" } else { "value" };
                 format!("{}-{}", subject, suffix)
             }
-            SubjectNamingStrategy::TopicNameStrategy { topic_name } => topic_name.clone(),
+            SubjectNamingStrategy::TopicNameStrategy { topic_name, is_key } => {
+                let suffix = if *is_key { "key" } else { "value" };
+                format!("{}-{}", topic_name, suffix)
+            }
             SubjectNamingStrategy::RecordNameStrategy { message_type_name } => {
                 message_type_name.clone()
             }
@@ -118,6 +128,7 @@ pub enum SubjectNamingStrategy {
     },
     TopicNameStrategy {
         topic_name: String,
+        is_key: bool,
     },
     TopicRecordNameStrategy {
         topic_name: String,

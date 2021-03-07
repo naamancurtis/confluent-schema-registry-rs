@@ -1,6 +1,8 @@
 use dashmap::DashMap;
+use lazy_static::lazy_static;
+use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, CONTENT_TYPE};
 use reqwest::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use std::sync::Arc;
 
@@ -8,6 +10,21 @@ use crate::deserializer::Deserializer;
 use crate::schema::{Format, Schema, SchemaDetails};
 use crate::serializer::Serializer;
 use crate::{Error, Result};
+
+lazy_static! {
+    static ref HEADERS: HeaderMap = {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            ACCEPT,
+            HeaderValue::from_static("application/vnd.schemaregistry.v1+json"),
+        );
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/vnd.schemaregistry.v1+json"),
+        );
+        headers
+    };
+}
 
 #[derive(Default)]
 pub struct SchemaRegistry {
@@ -33,19 +50,29 @@ impl SchemaRegistry {
         }
     }
 
-    pub async fn get_serializer(&self, details: SchemaDetails) -> Result<Serializer> {
-        let schema = self.get_schema_by_subject(&details).await?;
+    /// Generate a serializer that is ready to serialize a type with the provided schema
+    ///
+    /// This is relatively cheap to create and clone
+    pub async fn get_serializer(&self, details: &SchemaDetails) -> Result<Serializer> {
+        let schema = self.get_schema_by_subject(details).await?;
         match details.format {
             Format::Avro => Ok(Serializer::Avro { schema }),
             _ => unimplemented!("only avro is currently supported"),
         }
     }
 
-    pub async fn get_deserializer(&self) -> Deserializer<'_> {
+    /// Generate a deserializer that is ready to deserialize any bytes which have previously been
+    /// encoded with the Confluent Schema Registry protocol
+    ///
+    /// Creating a deserializer is effectively free
+    pub fn get_deserializer(&self) -> Deserializer<'_> {
         Deserializer { registry: self }
     }
 
-    pub async fn get_schema_by_subject(&self, schema_details: &SchemaDetails) -> Result<SchemaRef> {
+    pub(crate) async fn get_schema_by_subject(
+        &self,
+        schema_details: &SchemaDetails,
+    ) -> Result<SchemaRef> {
         let subject = schema_details.generate_subject_name();
         let version = schema_details.version;
 
@@ -93,7 +120,7 @@ impl SchemaRegistry {
         }
     }
 
-    pub async fn get_schema_by_id(&self, id: u32, format: Format) -> Result<SchemaRef> {
+    pub(crate) async fn get_schema_by_id(&self, id: u32, format: Format) -> Result<SchemaRef> {
         if let Some((id, schema)) = self.check_cache_for_schema(None, None, Some(id)) {
             let resp = SchemaRef { schema, id };
             return Ok(resp);
@@ -106,6 +133,22 @@ impl SchemaRegistry {
         };
         self.schemas.insert(id, Arc::clone(&resp.schema));
         Ok(resp)
+    }
+
+    /// Takes a reference to a slice of raw schema strings and their corresponding schema details
+    /// and posts them to the schema registry, this also pre-populates the client with the
+    /// identification details of all of those schemas
+    pub async fn post_schemas_to_registry(&self, schemas: &[(&str, &SchemaDetails)]) -> Result<()> {
+        for (schema, details) in schemas {
+            let url = format!("{}/subjects/{}", self.url, details.generate_subject_name());
+            let req = SchemaRegistryRequest {
+                schema,
+                schema_type: details.format,
+            };
+            self.post_schema_and_parse_response(&url, &req, details.format, details.version)
+                .await?;
+        }
+        Ok(())
     }
 }
 
@@ -143,13 +186,23 @@ impl SchemaRegistry {
             SchemaQueryType::Id(id) => {
                 let url = format!("{}/schemas/ids/{}", self.url, id);
 
-                let response = self.http_client.get(&url).send().await?;
+                let response = self
+                    .http_client
+                    .get(&url)
+                    .headers(HEADERS.clone())
+                    .send()
+                    .await?;
                 let resp = response.json::<SchemaRegistryResponse>().await?;
                 Ok((id, resp.schema))
             }
             SchemaQueryType::Latest(subject) => {
                 let url = format!("{}/subjects/{}/versions/latest", self.url, subject);
-                let response = self.http_client.get(&url).send().await?;
+                let response = self
+                    .http_client
+                    .get(&url)
+                    .headers(HEADERS.clone())
+                    .send()
+                    .await?;
                 let resp = response.json::<SchemaRegistryResponse>().await?;
                 if resp.id.is_none() {
                     return Err(Error::IDNotReturned);
@@ -158,7 +211,12 @@ impl SchemaRegistry {
             }
             SchemaQueryType::Version(subject, version) => {
                 let url = format!("{}/subjects/{}/versions/{}", self.url, subject, version);
-                let response = self.http_client.get(&url).send().await?;
+                let response = self
+                    .http_client
+                    .get(&url)
+                    .headers(HEADERS.clone())
+                    .send()
+                    .await?;
                 let resp = response.json::<SchemaRegistryResponse>().await?;
                 if resp.id.is_none() {
                     return Err(Error::IDNotReturned);
@@ -167,6 +225,45 @@ impl SchemaRegistry {
             }
         }
     }
+
+    async fn post_schema_and_parse_response(
+        &self,
+        url: &str,
+        req: &SchemaRegistryRequest<'_>,
+        format: Format,
+        version: Option<u32>,
+    ) -> Result<()> {
+        let response = self
+            .http_client
+            .post(url)
+            .headers(HEADERS.clone())
+            .json(req)
+            .send()
+            .await?
+            .json::<SchemaRegistryResponse>()
+            .await?;
+        let parsed_schema = format.parse_schema(&response.schema)?;
+        if let Some(id) = response.id {
+            self.schemas.insert(id, Arc::new(parsed_schema));
+            if let Some(subject) = response.subject {
+                if version.is_none() {
+                    self.subject_to_latest_id.insert(subject.clone(), id);
+                }
+                if let Some(version) = response.version {
+                    self.subject_version_to_id.insert((subject, version), id);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all(serialize = "camelCase"))]
+struct SchemaRegistryRequest<'a> {
+    schema: &'a str,
+    schema_type: Format,
+    // references // @TODO
 }
 
 #[derive(Debug, Deserialize)]
@@ -177,7 +274,7 @@ struct SchemaRegistryResponse {
     schema: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SchemaRef {
     pub(crate) schema: Arc<Schema>,
     pub(crate) id: u32,

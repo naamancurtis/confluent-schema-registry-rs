@@ -5,6 +5,7 @@ use crate::schema::Schema;
 use crate::schema_registry::SchemaRef;
 use crate::{Error, Result};
 
+#[derive(Clone)]
 pub enum Serializer {
     Avro { schema: SchemaRef },
 }
