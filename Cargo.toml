@@ -23,3 +23,7 @@ trace = { version = "^0.1", optional = true, package = "tracing" }
 logging = { version = "^0.4", optional = true, package = "log" }
 protobuf = { version = "^2.22", optional = true }
 avro_rs = { version = "^0.13", optional = true, package = "avro-rs"}
+
+[dev-dependencies]
+anyhow = "1.0.38"
+
