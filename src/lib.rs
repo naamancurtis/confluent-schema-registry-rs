@@ -6,7 +6,7 @@ mod serializer;
 
 pub use error::Error;
 pub type Result<T> = std::result::Result<T, Error>;
-pub use deserializer::Deserializer;
+pub use deserializer::{CachedDeserializer, Deserializer};
 pub use schema::{Format, SchemaDetails, SubjectNamingStrategy};
 pub use schema_registry::SchemaRegistry;
 pub use serializer::Serializer;
