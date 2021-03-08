@@ -24,6 +24,7 @@ logging = { version = "^0.4", optional = true, package = "log" }
 protobuf = { version = "^2.22", optional = true }
 avro_rs = { version = "^0.13", optional = true, package = "avro-rs" }
 lazy_static = "^1.4"
+serde_json = "1.0.64"
 
 [dev-dependencies]
 anyhow = "1.0.38"

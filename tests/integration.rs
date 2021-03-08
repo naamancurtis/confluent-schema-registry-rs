@@ -39,11 +39,11 @@ async fn it_works() -> Result<()> {
         b: String::from("My Test"),
     };
 
-    let mut serializer = registry.get_serializer(&details).await?;
+    let serializer = registry.get_serializer(&details).await?;
     let bytes = serializer.serialize(&test)?;
     assert_eq!(bytes[0], 0);
 
-    let mut deserializer = registry.get_deserializer();
+    let deserializer = registry.get_deserializer();
     let result = deserializer.deserialize(&bytes, Format::Avro).await?;
     assert_eq!(test, result);
 

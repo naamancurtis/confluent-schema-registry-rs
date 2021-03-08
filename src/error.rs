@@ -23,5 +23,11 @@ pub enum Error {
     DeserializationFailed,
 
     #[error("Either the subject or the ID must be a valid value to find a schema")]
-    InvalidInput
+    InvalidInput,
+
+    #[error("Received error from the schema registry, error code {error_code}: {message}")]
+    SchemaRegistryError { error_code: u32, message: String },
+
+    #[error("An unexpected error occurred")]
+    UnexpectedError,
 }

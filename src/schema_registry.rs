@@ -140,13 +140,23 @@ impl SchemaRegistry {
     /// identification details of all of those schemas
     pub async fn post_schemas_to_registry(&self, schemas: &[(&str, &SchemaDetails)]) -> Result<()> {
         for (schema, details) in schemas {
-            let url = format!("{}/subjects/{}", self.url, details.generate_subject_name());
+            let url = format!(
+                "{}/subjects/{}/versions",
+                self.url,
+                details.generate_subject_name()
+            );
             let req = SchemaRegistryRequest {
                 schema,
                 schema_type: details.format,
             };
-            self.post_schema_and_parse_response(&url, &req, details.format, details.version)
-                .await?;
+            // I don't really like this, but this call is required to add a NEW schema
+            // however it doesn't return a full set of information, so we basically ignore it
+            self.post_schema(&url, &req).await.ok();
+            let url = format!("{}/subjects/{}", self.url, details.generate_subject_name());
+            // This call actually gives us the information we need, however it won't add a schema
+            // if it doesn't already exist
+            let schema = self.post_schema(&url, &req).await?;
+            self.parse_response(schema, details.format, details.version)?;
         }
         Ok(())
     }
@@ -185,55 +195,57 @@ impl SchemaRegistry {
         match query {
             SchemaQueryType::Id(id) => {
                 let url = format!("{}/schemas/ids/{}", self.url, id);
-
-                let response = self
-                    .http_client
-                    .get(&url)
-                    .headers(HEADERS.clone())
-                    .send()
-                    .await?;
-                let resp = response.json::<SchemaRegistryResponse>().await?;
-                Ok((id, resp.schema))
+                let (_, schema) = self.get_schema(&url).await?;
+                Ok((id, schema))
             }
             SchemaQueryType::Latest(subject) => {
                 let url = format!("{}/subjects/{}/versions/latest", self.url, subject);
-                let response = self
-                    .http_client
-                    .get(&url)
-                    .headers(HEADERS.clone())
-                    .send()
-                    .await?;
-                let resp = response.json::<SchemaRegistryResponse>().await?;
-                if resp.id.is_none() {
+                let (id, schema) = self.get_schema(&url).await?;
+                if id.is_none() {
                     return Err(Error::IDNotReturned);
                 }
-                Ok((resp.id.unwrap(), resp.schema))
+                Ok((id.unwrap(), schema))
             }
             SchemaQueryType::Version(subject, version) => {
                 let url = format!("{}/subjects/{}/versions/{}", self.url, subject, version);
-                let response = self
-                    .http_client
-                    .get(&url)
-                    .headers(HEADERS.clone())
-                    .send()
-                    .await?;
-                let resp = response.json::<SchemaRegistryResponse>().await?;
-                if resp.id.is_none() {
+                let (id, schema) = self.get_schema(&url).await?;
+                if id.is_none() {
                     return Err(Error::IDNotReturned);
                 }
-                Ok((resp.id.unwrap(), resp.schema))
+                Ok((id.unwrap(), schema))
             }
         }
     }
 
-    async fn post_schema_and_parse_response(
+    async fn get_schema(&self, url: &str) -> Result<(Option<u32>, String)> {
+        let mut response = self
+            .http_client
+            .get(url)
+            .headers(HEADERS.clone())
+            .send()
+            .await?
+            .json::<SchemaRegistryResponse>()
+            .await?;
+        if let Some(data) = response.response.take() {
+            return Ok((data.id, data.schema));
+        }
+        if let Some(error) = response.error.take() {
+            return Err(Error::SchemaRegistryError {
+                error_code: error.error_code,
+                message: error
+                    .message
+                    .unwrap_or_else(|| "Unexpected error from the schema registry".to_owned()),
+            });
+        }
+        Err(Error::UnexpectedError)
+    }
+
+    async fn post_schema(
         &self,
         url: &str,
         req: &SchemaRegistryRequest<'_>,
-        format: Format,
-        version: Option<u32>,
-    ) -> Result<()> {
-        let response = self
+    ) -> Result<SchemaRegistryData> {
+        let mut response = self
             .http_client
             .post(url)
             .headers(HEADERS.clone())
@@ -242,6 +254,26 @@ impl SchemaRegistry {
             .await?
             .json::<SchemaRegistryResponse>()
             .await?;
+        if let Some(data) = response.response.take() {
+            return Ok(data);
+        }
+        if let Some(error) = response.error.take() {
+            return Err(Error::SchemaRegistryError {
+                error_code: error.error_code,
+                message: error
+                    .message
+                    .unwrap_or_else(|| "Unexpected error from the schema registry".to_owned()),
+            });
+        }
+        Err(Error::UnexpectedError)
+    }
+
+    fn parse_response(
+        &self,
+        response: SchemaRegistryData,
+        format: Format,
+        version: Option<u32>,
+    ) -> Result<()> {
         let parsed_schema = format.parse_schema(&response.schema)?;
         if let Some(id) = response.id {
             self.schemas.insert(id, Arc::new(parsed_schema));
@@ -268,10 +300,24 @@ struct SchemaRegistryRequest<'a> {
 
 #[derive(Debug, Deserialize)]
 struct SchemaRegistryResponse {
+    #[serde(flatten)]
+    response: Option<SchemaRegistryData>,
+    #[serde(flatten)]
+    error: Option<SchemaRegistryError>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SchemaRegistryData {
     subject: Option<String>,
     id: Option<u32>,
     version: Option<u32>,
     schema: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SchemaRegistryError {
+    error_code: u32,
+    message: Option<String>,
 }
 
 #[derive(Debug, Clone)]
