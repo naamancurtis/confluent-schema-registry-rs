@@ -10,11 +10,7 @@ pub struct Deserializer<'a> {
 }
 
 impl<'a> Deserializer<'a> {
-    pub async fn deserialize<D: DeserializeOwned>(
-        &mut self,
-        data: &[u8],
-        format: Format,
-    ) -> Result<D> {
+    pub async fn deserialize<D: DeserializeOwned>(&self, data: &[u8], format: Format) -> Result<D> {
         if data.len() < 5 {
             return Err(Error::NoDataFound);
         }

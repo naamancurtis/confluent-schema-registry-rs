@@ -11,7 +11,7 @@ pub enum Serializer {
 }
 
 impl Serializer {
-    pub fn serialize<S: Serialize>(&mut self, data: S) -> Result<Vec<u8>> {
+    pub fn serialize<S: Serialize>(&self, data: S) -> Result<Vec<u8>> {
         match *self {
             Self::Avro { ref schema } => {
                 // Add magic bytes
