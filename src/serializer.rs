@@ -1,4 +1,3 @@
-use avro_rs::Writer;
 use serde::Serialize;
 
 use crate::schema::Schema;
@@ -17,12 +16,10 @@ impl Serializer {
                 // Add magic bytes
                 let id = schema.id;
                 if let Schema::Avro(ref s) = &*schema.schema {
-                    let size = std::mem::size_of::<S>();
-                    let mut w = Writer::new(&s, Vec::with_capacity(size));
-                    w.append_ser(data)?;
-                    let mut serialized_data = w.into_inner()?;
-                    let bytes = add_magic_byte_and_schema_id(&mut serialized_data, id);
-                    Ok(bytes)
+                    let value = avro_rs::to_value(data)?;
+                    let mut bytes = avro_rs::to_avro_datum(&s, value)?;
+                    let serialized_bytes = add_magic_byte_and_schema_id(&mut bytes, id);
+                    Ok(serialized_bytes)
                 } else {
                     Err(Error::IncorrectSchemaType(
                         "Avro".to_owned(),

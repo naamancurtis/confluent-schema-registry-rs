@@ -1,12 +1,13 @@
 use dashmap::DashMap;
+use futures_locks::RwLock;
 use lazy_static::lazy_static;
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, CONTENT_TYPE};
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use std::sync::Arc;
 
-use crate::deserializer::Deserializer;
+use crate::deserializer::{CachedDeserializer, Deserializer};
 use crate::schema::{Format, Schema, SchemaDetails};
 use crate::serializer::Serializer;
 use crate::{Error, Result};
@@ -51,8 +52,6 @@ impl SchemaRegistry {
     }
 
     /// Generate a serializer that is ready to serialize a type with the provided schema
-    ///
-    /// This is relatively cheap to create and clone
     pub async fn get_serializer(&self, details: &SchemaDetails) -> Result<Serializer> {
         let schema = self.get_schema_by_subject(details).await?;
         match details.format {
@@ -63,10 +62,24 @@ impl SchemaRegistry {
 
     /// Generate a deserializer that is ready to deserialize any bytes which have previously been
     /// encoded with the Confluent Schema Registry protocol
-    ///
-    /// Creating a deserializer is effectively free
     pub fn get_deserializer(&self) -> Deserializer<'_> {
         Deserializer { registry: self }
+    }
+
+    /// Generate a deserializer that is ready to deserialize any bytes which have previously been
+    /// encoded with the Confluent Schema Registry protocol
+    ///
+    /// This deserializer will cache the schema of the first type it deserializes, and use that for
+    /// all subsequent deserilizations.
+    ///
+    /// This only really has the use case when you know you are only going to be deserializing one
+    /// type, and they all use the exact same version of the schema, however when this case is
+    /// true, this will allow you to reduce the network traffic for deserialization
+    pub fn get_cached_deserializer(&self) -> CachedDeserializer<'_> {
+        CachedDeserializer {
+            registry: self,
+            schema: RwLock::new(None),
+        }
     }
 
     pub(crate) async fn get_schema_by_subject(
@@ -151,11 +164,20 @@ impl SchemaRegistry {
             };
             // I don't really like this, but this call is required to add a NEW schema
             // however it doesn't return a full set of information, so we basically ignore it
-            self.post_schema(&url, &req).await.ok();
+            match self
+                .post_schema::<SchemaRegistryPostResponse>(&url, &req)
+                .await
+            {
+                Ok(_) => {}
+                Err(e) => return Err(e),
+            };
             let url = format!("{}/subjects/{}", self.url, details.generate_subject_name());
             // This call actually gives us the information we need, however it won't add a schema
             // if it doesn't already exist
-            let schema = self.post_schema(&url, &req).await?;
+            let schema = self
+                .post_schema::<SchemaRegistryResponse>(&url, &req)
+                .await
+                .map(parse_post_response)??;
             self.parse_response(schema, details.format, details.version)?;
         }
         Ok(())
@@ -218,54 +240,33 @@ impl SchemaRegistry {
     }
 
     async fn get_schema(&self, url: &str) -> Result<(Option<u32>, String)> {
-        let mut response = self
+        let response = self
             .http_client
             .get(url)
             .headers(HEADERS.clone())
             .send()
             .await?
             .json::<SchemaRegistryResponse>()
-            .await?;
-        if let Some(data) = response.response.take() {
-            return Ok((data.id, data.schema));
-        }
-        if let Some(error) = response.error.take() {
-            return Err(Error::SchemaRegistryError {
-                error_code: error.error_code,
-                message: error
-                    .message
-                    .unwrap_or_else(|| "Unexpected error from the schema registry".to_owned()),
-            });
-        }
-        Err(Error::UnexpectedError)
+            .await
+            .map(|resp| parse_post_response(resp).map(|data| (data.id, data.schema)))??;
+        Ok(response)
     }
 
-    async fn post_schema(
+    async fn post_schema<D: DeserializeOwned>(
         &self,
         url: &str,
         req: &SchemaRegistryRequest<'_>,
-    ) -> Result<SchemaRegistryData> {
-        let mut response = self
+    ) -> Result<D> {
+        let response = self
             .http_client
             .post(url)
             .headers(HEADERS.clone())
             .json(req)
             .send()
             .await?
-            .json::<SchemaRegistryResponse>()
+            .json::<D>()
             .await?;
-        if let Some(data) = response.response.take() {
-            return Ok(data);
-        }
-        if let Some(error) = response.error.take() {
-            return Err(Error::SchemaRegistryError {
-                error_code: error.error_code,
-                message: error
-                    .message
-                    .unwrap_or_else(|| "Unexpected error from the schema registry".to_owned()),
-            });
-        }
-        Err(Error::UnexpectedError)
+        Ok(response)
     }
 
     fn parse_response(
@@ -290,6 +291,21 @@ impl SchemaRegistry {
     }
 }
 
+fn parse_post_response(mut response: SchemaRegistryResponse) -> Result<SchemaRegistryData> {
+    if let Some(data) = response.data.take() {
+        return Ok(data);
+    }
+    if let Some(error) = response.error.take() {
+        return Err(Error::SchemaRegistryError {
+            error_code: error.error_code,
+            message: error
+                .message
+                .unwrap_or_else(|| "Unexpected error from the schema registry".to_owned()),
+        });
+    }
+    Err(Error::UnexpectedError)
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all(serialize = "camelCase"))]
 struct SchemaRegistryRequest<'a> {
@@ -301,9 +317,14 @@ struct SchemaRegistryRequest<'a> {
 #[derive(Debug, Deserialize)]
 struct SchemaRegistryResponse {
     #[serde(flatten)]
-    response: Option<SchemaRegistryData>,
+    data: Option<SchemaRegistryData>,
     #[serde(flatten)]
     error: Option<SchemaRegistryError>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SchemaRegistryPostResponse {
+    id: u32,
 }
 
 #[derive(Debug, Deserialize)]
