@@ -1,12 +1,11 @@
 use futures_locks::RwLock;
-use std::io::Cursor;
-
 use serde::de::DeserializeOwned;
 
-use crate::{
-    schema::{Format, Schema},
-    schema_registry::SchemaRef,
-};
+use std::io::Cursor;
+use std::sync::Arc;
+
+use crate::schema::{Format, Schema};
+use crate::schema_registry::SchemaRef;
 use crate::{Error, Result, SchemaRegistry};
 
 #[derive(Clone, Copy)]
@@ -16,21 +15,7 @@ pub struct Deserializer<'a> {
 
 impl<'a> Deserializer<'a> {
     pub async fn deserialize<D: DeserializeOwned>(&self, data: &[u8], format: Format) -> Result<D> {
-        if data.len() < 5 {
-            return Err(Error::NoDataFound);
-        }
-        if data[0] != 0 {
-            return Err(Error::NoMagicByte);
-        }
-        let id = [data[1], data[2], data[3], data[4]];
-        let id = u32::from_be_bytes(id);
-        let raw_data = &data[5..];
-        match format {
-            Format::Avro => {
-                let schema_ref = self.registry.get_schema_by_id(id, format).await?;
-                deserialize_avro(&schema_ref, &raw_data)
-            }
-        }
+        deserialize_uncached(self, data, format).await
     }
 }
 
@@ -42,30 +27,134 @@ pub struct CachedDeserializer<'a> {
 
 impl<'a> CachedDeserializer<'a> {
     pub async fn deserialize<D: DeserializeOwned>(&self, data: &[u8], format: Format) -> Result<D> {
-        if data.len() < 5 {
-            return Err(Error::NoDataFound);
+        deserialize_cached(self, data, format).await
+    }
+}
+
+#[derive(Clone)]
+pub struct ArcDeserializer {
+    pub(crate) registry: Arc<SchemaRegistry>,
+}
+
+impl ArcDeserializer {
+    pub fn new(registry: Arc<SchemaRegistry>) -> Self {
+        Self { registry }
+    }
+
+    pub async fn deserialize<D: DeserializeOwned>(&self, data: &[u8], format: Format) -> Result<D> {
+        deserialize_uncached(self, data, format).await
+    }
+}
+
+#[derive(Clone)]
+pub struct ArcCachedDeserializer {
+    pub(crate) registry: Arc<SchemaRegistry>,
+    pub(crate) schema: RwLock<Option<SchemaRef>>,
+}
+
+impl ArcCachedDeserializer {
+    pub fn new(registry: Arc<SchemaRegistry>) -> Self {
+        Self {
+            registry,
+            schema: RwLock::new(None),
         }
-        if data[0] != 0 {
-            return Err(Error::NoMagicByte);
+    }
+
+    pub async fn deserialize<D: DeserializeOwned>(&self, data: &[u8], format: Format) -> Result<D> {
+        deserialize_cached(self, data, format).await
+    }
+}
+
+trait DeserializeUncached {
+    fn get_registry(&self) -> &SchemaRegistry;
+}
+
+impl DeserializeUncached for ArcDeserializer {
+    fn get_registry(&self) -> &SchemaRegistry {
+        &self.registry
+    }
+}
+
+impl<'a> DeserializeUncached for Deserializer<'a> {
+    fn get_registry(&self) -> &SchemaRegistry {
+        &self.registry
+    }
+}
+
+trait DeserializeCached {
+    fn get_schema(&self) -> &RwLock<Option<SchemaRef>>;
+    fn get_registry(&self) -> &SchemaRegistry;
+}
+
+impl DeserializeCached for ArcCachedDeserializer {
+    fn get_schema(&self) -> &RwLock<Option<SchemaRef>> {
+        &self.schema
+    }
+
+    fn get_registry(&self) -> &SchemaRegistry {
+        &self.registry
+    }
+}
+
+impl<'a> DeserializeCached for CachedDeserializer<'a> {
+    fn get_schema(&self) -> &RwLock<Option<SchemaRef>> {
+        &self.schema
+    }
+
+    fn get_registry(&self) -> &SchemaRegistry {
+        &self.registry
+    }
+}
+async fn deserialize_uncached<D: DeserializeOwned>(
+    this: &impl DeserializeUncached,
+    data: &[u8],
+    format: Format,
+) -> Result<D> {
+    if data.len() < 5 {
+        return Err(Error::NoDataFound);
+    }
+    if data[0] != 0 {
+        return Err(Error::NoMagicByte);
+    }
+    let id = [data[1], data[2], data[3], data[4]];
+    let id = u32::from_be_bytes(id);
+    let raw_data = &data[5..];
+    match format {
+        Format::Avro => {
+            let schema_ref = this.get_registry().get_schema_by_id(id, format).await?;
+            deserialize_avro(&schema_ref, &raw_data)
         }
-        let id = [data[1], data[2], data[3], data[4]];
-        let id = u32::from_be_bytes(id);
-        let raw_data = &data[5..];
-        match format {
-            Format::Avro => loop {
-                {
-                    let handle = self.schema.read().await;
-                    if let Some(ref schema_ref) = *handle {
-                        return deserialize_avro(schema_ref, &raw_data);
-                    }
+    }
+}
+
+async fn deserialize_cached<D: DeserializeOwned>(
+    this: &impl DeserializeCached,
+    data: &[u8],
+    format: Format,
+) -> Result<D> {
+    if data.len() < 5 {
+        return Err(Error::NoDataFound);
+    }
+    if data[0] != 0 {
+        return Err(Error::NoMagicByte);
+    }
+    let id = [data[1], data[2], data[3], data[4]];
+    let id = u32::from_be_bytes(id);
+    let raw_data = &data[5..];
+    match format {
+        Format::Avro => loop {
+            {
+                let handle = this.get_schema().read().await;
+                if let Some(ref schema_ref) = *handle {
+                    return deserialize_avro(schema_ref, &raw_data);
                 }
-                {
-                    let schema_ref = self.registry.get_schema_by_id(id, format).await?;
-                    let mut handle = self.schema.write().await;
-                    *handle = Some(schema_ref);
-                }
-            },
-        }
+            }
+            {
+                let schema_ref = this.get_registry().get_schema_by_id(id, format).await?;
+                let mut handle = this.get_schema().write().await;
+                *handle = Some(schema_ref);
+            }
+        },
     }
 }
 
