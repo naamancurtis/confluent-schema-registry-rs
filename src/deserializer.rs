@@ -42,7 +42,6 @@ pub struct CachedDeserializer<'a> {
 
 impl<'a> CachedDeserializer<'a> {
     pub async fn deserialize<D: DeserializeOwned>(&self, data: &[u8], format: Format) -> Result<D> {
-        dbg!(&data);
         if data.len() < 5 {
             return Err(Error::NoDataFound);
         }
