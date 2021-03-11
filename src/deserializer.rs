@@ -150,9 +150,10 @@ async fn deserialize_cached<D: DeserializeOwned>(
                 }
             }
             {
-                let schema_ref = this.get_registry().get_schema_by_id(id, format).await?;
-                let mut handle = this.get_schema().write().await;
-                *handle = Some(schema_ref);
+                if let Ok(mut handle) = this.get_schema().try_write() {
+                    let schema_ref = this.get_registry().get_schema_by_id(id, format).await?;
+                    *handle = Some(schema_ref);
+                }
             }
         },
     }
